@@ -5,8 +5,9 @@ if not isinstance(sys.stdout, io.TextIOWrapper) or sys.stdout.encoding != 'utf-8
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 if not isinstance(sys.stderr, io.TextIOWrapper) or sys.stderr.encoding != 'utf-8':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
-os.chdir(r'c:\Users\LENOVO\Desktop\华中杯1.1')
-sys.path.insert(0, r'c:\Users\LENOVO\Desktop\华中杯1.1')
+_HERE = os.path.dirname(os.path.abspath(__file__))
+os.chdir(_HERE)
+sys.path.insert(0, _HERE)
 
 from solve_p1 import (
     load_data, eval_r, opt_start, two_opt, or_opt,

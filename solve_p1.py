@@ -16,7 +16,9 @@ matplotlib.rcParams['font.sans-serif'] = ['SimHei','Microsoft YaHei','DejaVu San
 matplotlib.rcParams['axes.unicode_minus'] = False
 random.seed(42); np.random.seed(42)
 
-BASE = r'c:\Users\LENOVO\Desktop\华中杯1.1'
+# 使用脚本所在目录作为 BASE，确保任何机器 clone 后直接可用
+import os
+BASE = os.path.dirname(os.path.abspath(__file__))
 def log(msg): print(msg, flush=True)
 
 # ── 常量 ──────────────────────────────────────────
