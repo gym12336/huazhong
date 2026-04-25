@@ -1,0 +1,62 @@
+{
+  "_说明": [
+    "问题3 异常事件配置文件",
+    "events 数组按列表顺序依次执行；time 为事件触发时刻(小时,如10.5表示10:30)",
+    "支持的事件类型 type:",
+    "  1) cancel_order   订单取消",
+    "       order_id   : 订单号(int)；或者用 customer_id 取消该客户全部订单",
+    "       customer_id: 客户原始ID(int)，与 order_id 二选一",
+    "  2) add_order      新增订单",
+    "       order_id     : 新订单号(int) 唯一",
+    "       customer_id  : 关联客户ID(已有客户)；新客户可直接用未占用的ID",
+    "       weight       : 重量(kg)",
+    "       volume       : 体积(m3)",
+    "       tw_start     : 时间窗起(小时)",
+    "       tw_end       : 时间窗止(小时)",
+    "       x, y         : 客户坐标(km)，仅新客户需要",
+    "  3) tw_adjust      时间窗调整",
+    "       customer_id  : 客户原始ID",
+    "       tw_start     : 新时间窗起(小时)",
+    "       tw_end       : 新时间窗止(小时)",
+    "  4) address_change 配送地址变更",
+    "       customer_id  : 客户原始ID",
+    "       x, y         : 新坐标(km)"
+  ],
+  "events": [
+    {
+      "type": "cancel_order",
+      "time": 10.5,
+      "customer_id": 42,
+      "note": "10:30 客户42全部订单取消（演示在途分支）"
+    },
+    {
+      "type": "add_order",
+      "time": 11.0,
+      "order_id": 9001,
+      "customer_id": 999,
+      "weight": 350.0,
+      "volume": 1.0,
+      "tw_start": 10.0,
+      "tw_end": 13.0,
+      "x": 4.0,
+      "y": -3.0,
+      "note": "11:00 绿色区紧急新增订单（演示EV约束 + 最小插入）"
+    },
+    {
+      "type": "address_change",
+      "time": 13.5,
+      "customer_id": 49,
+      "x": 3.0,
+      "y": 4.0,
+      "note": "13:30 客户49地址移入绿色区（演示未发车→重做P1）"
+    },
+    {
+      "type": "tw_adjust",
+      "time": 14.0,
+      "customer_id": 39,
+      "tw_start": 11.7,
+      "tw_end": 12.3,
+      "note": "14:00 客户39时窗收窄到[11:42,12:18]（演示赶不上→2-opt）"
+    }
+  ]
+}

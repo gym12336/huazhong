@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """华中杯A题 问题3：动态事件下的实时车辆调度策略"""
-import sys, io, os, time, math, random, copy
+import sys, io, os, time, math, random, copy, json
 if not isinstance(sys.stdout, io.TextIOWrapper) or sys.stdout.encoding != 'utf-8':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 if not isinstance(sys.stderr, io.TextIOWrapper) or sys.stderr.encoding != 'utf-8':
@@ -982,89 +982,66 @@ if __name__ == '__main__':
     ds = DynamicSchedule(flex_sched, dm, dw, dv, tw_s, tw_e, n2o, coords)
     ds_snapshot = copy.deepcopy(ds)  # 保存初始状态用于对比可视化
 
-    # ── 数据驱动选择事件触发对象 ─────────────────
-    # 选择策略：覆盖"在途"与"未发车"两种状态分支
-    # 事件1（取消订单）：选 10:30 时刻 trip 已发车（in_transit）的客户
-    cancel_target = None
-    for veh in ds.vehicles:
-        for t in veh['trips']:
-            if not (8.5 <= t['start'] <= 10.4): continue
-            for nd in t['route'][1:-1]:
-                orig = ds.n2o.get(nd, nd)
-                if orig in ds.orders_per_cust and orig not in green_orig:
-                    cancel_target = orig; break
-            if cancel_target: break
-        if cancel_target: break
-
-    # 事件2（新增订单）：在绿色区内构造新订单 → 触发 EV 约束 + 走"插入或重做P1"
-    add_x, add_y, add_w, add_v = 4.0, -3.0, 350.0, 1.0
-    add_tw = (10.0, 13.0)
-    new_order_id = max(ds.order2cust.keys(), default=0) + 1
-    new_cust_id = 999
-
-    # 事件3（地址变更）：选 trip 未发车（pending）的客户 → 走"重做问题1"
-    addr_target = None
-    for veh in ds.vehicles:
-        if _is_ev(veh['vt']): continue
-        for t in veh['trips']:
-            if t['start'] <= 13.6: continue
-            for nd in t['route'][1:-1]:
-                orig = ds.n2o.get(nd, nd)
-                if orig in green_orig: continue
-                if orig in (cancel_target,): continue
-                px, py = coords.get(orig, (0, 0))
-                if not _in_green(px, py):
-                    addr_target = orig; break
-            if addr_target: break
-        if addr_target: break
-
-    # 事件4（时间窗收窄）：选 14:00 时刻 trip 在途的客户 → 走"在途/收窄/赶得上或赶不上"
-    tw_target = None
-    for veh in ds.vehicles:
-        for t in veh['trips']:
-            if not (12.0 <= t['start'] <= 13.99): continue
-            for nd in t['route'][1:-1]:
-                orig = ds.n2o.get(nd, nd)
-                if orig in (cancel_target, addr_target): continue
-                tw_target = orig; break
-            if tw_target: break
-        if tw_target: break
-
-    log(f"\n[事件参数 - 数据驱动 + 状态覆盖]")
-    log(f"  取消: 客户{cancel_target} 的全部订单 (10:30 时已在途)")
-    log(f"  新增: 订单{new_order_id} 客户{new_cust_id} 绿色区内 (11:00)")
-    log(f"  地址变更: 客户{addr_target} 移入绿色区 (13:30 时未发车 → 重做P1)")
-    log(f"  时间窗调整: 客户{tw_target} 收窄到原均值±0.3h (14:00 时在途)")
+    # ── 从配置文件读取异常事件并按序触发 ─────────
+    cfg_path = os.environ.get('P3_EVENTS', f'{BASE}/p3_events.json')
+    if not os.path.exists(cfg_path):
+        log(f"\n⚠ 未找到事件配置 {cfg_path}，使用空事件列表")
+        events_cfg = []
+    else:
+        with open(cfg_path, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+        events_cfg = cfg.get('events', [])
+        log(f"\n事件配置: {cfg_path} ({len(events_cfg)}个事件)")
 
     log("\n" + "="*60)
-    log("演示场景一：订单取消(在途) + 新增订单(绿色区)")
+    log("按配置文件依次触发异常事件")
     log("="*60)
 
-    if cancel_target is not None:
-        ds.event_cancel_order(order_id=cancel_target, current_time=10.5,
-                              kind='customer')
-    ds.event_add_order(
-        new_order_id=new_order_id, cust_orig=new_cust_id,
-        w=add_w, v=add_v, tw_s_new=add_tw[0], tw_e_new=add_tw[1],
-        x=add_x, y=add_y, current_time=11.0
-    )
+    for idx, ev in enumerate(events_cfg, 1):
+        etype = ev.get('type'); etime = float(ev.get('time', 0))
+        note = ev.get('note', '')
+        log(f"\n── 事件{idx}/{len(events_cfg)} type={etype} @{_fmt_h(etime)} {note}")
 
-    log("\n" + "="*60)
-    log("演示场景二：地址变更(未发车→重做P1) + 时间窗收窄(在途)")
-    log("="*60)
+        if etype == 'cancel_order':
+            if 'order_id' in ev:
+                ds.event_cancel_order(order_id=int(ev['order_id']),
+                                      current_time=etime, kind='order')
+            elif 'customer_id' in ev:
+                ds.event_cancel_order(order_id=int(ev['customer_id']),
+                                      current_time=etime, kind='customer')
+            else:
+                log(f"    ⚠ cancel_order 缺少 order_id 或 customer_id，跳过")
 
-    if addr_target is not None:
-        ds.event_address_change(
-            cust_orig=addr_target, new_x=3.0, new_y=4.0, current_time=13.5)
-    if tw_target is not None:
-        orig_s = tw_s.get(tw_target, 0)
-        orig_e = tw_e.get(tw_target, 24)
-        mid = (orig_s + orig_e) / 2
-        ds.event_tw_adjust(
-            cust_orig=tw_target,
-            new_tw_s=mid - 0.3, new_tw_e=mid + 0.3,
-            current_time=14.0
-        )
+        elif etype == 'add_order':
+            cust = int(ev['customer_id'])
+            x = float(ev.get('x', coords.get(cust, (0, 0))[0]))
+            y = float(ev.get('y', coords.get(cust, (0, 0))[1]))
+            ds.event_add_order(
+                new_order_id=int(ev['order_id']),
+                cust_orig=cust,
+                w=float(ev['weight']), v=float(ev['volume']),
+                tw_s_new=float(ev['tw_start']),
+                tw_e_new=float(ev['tw_end']),
+                x=x, y=y, current_time=etime
+            )
+
+        elif etype == 'tw_adjust':
+            ds.event_tw_adjust(
+                cust_orig=int(ev['customer_id']),
+                new_tw_s=float(ev['tw_start']),
+                new_tw_e=float(ev['tw_end']),
+                current_time=etime
+            )
+
+        elif etype == 'address_change':
+            ds.event_address_change(
+                cust_orig=int(ev['customer_id']),
+                new_x=float(ev['x']), new_y=float(ev['y']),
+                current_time=etime
+            )
+
+        else:
+            log(f"    ⚠ 未知事件类型 {etype}，跳过")
 
     # 3. 汇总报告
     log("\n" + "="*60)
