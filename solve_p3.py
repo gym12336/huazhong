@@ -300,6 +300,40 @@ class DynamicSchedule:
             log(f"    [跨路线重优化{label}] 待发路段 {cost_before:.2f}→{cost_after:.2f} "
                 f"(节省{cost_before-cost_after:.2f})")
 
+    def _split_route_by_time(self, trip, current_time):
+        """
+        把已发车 trip 的 route 切分成 (locked_prefix, remaining_suffix)：
+        - locked_prefix: 已访问过的节点序列（含 depot 起点 + 已服务客户）
+                         车辆当前所处位置 = locked_prefix[-1]
+        - remaining_suffix: 尚未访问的节点序列（不含车辆当前位置，
+                            含末尾返回 depot 节点）
+        判定依据：模拟离开时刻 < current_time → 已访问
+        若 trip 还未发车，整条路线都属于 remaining。
+        """
+        r = trip['route']
+        if trip['start'] > current_time:
+            return [r[0]], r[1:]
+        cur_t = trip['start']
+        last_served_idx = 0
+        for i in range(1, len(r)):
+            a, b = r[i-1], r[i]
+            cur_t += tt(self.dm[a][b], cur_t)
+            if b == 0:
+                if cur_t < current_time:
+                    last_served_idx = i
+                break
+            ws = self.tw_s.get(b, 0)
+            if cur_t < ws: cur_t = ws
+            cur_t += SVC_H
+            leave_t = cur_t
+            if leave_t < current_time:
+                last_served_idx = i
+            else:
+                break
+        locked = r[:last_served_idx + 1]
+        remaining = r[last_served_idx + 1:]
+        return locked, remaining
+
     # ── 事件1：订单取消（订单级） ──────────────────
     def event_cancel_order(self, order_id, current_time, kind='auto'):
         """
@@ -344,19 +378,26 @@ class DynamicSchedule:
             log(f"    客户{cust_orig}不在当前调度路线中 → 无需调整")
             return cost_before
 
-        # 3) 更新订单表 + 重新计算该客户聚合需求
+        # 3) 更新订单表 + 从被取消订单的承运节点扣减需求
+        cancel_w_total = 0.0; cancel_v_total = 0.0
         for oid in cancel_orders:
+            wv = self.orders_per_cust.get(cust_orig, {}).get(oid)
+            if wv:
+                cancel_w_total += wv[0]; cancel_v_total += wv[1]
             self.orders_per_cust[cust_orig].pop(oid, None)
             self.order2cust.pop(oid, None)
         remaining = self.orders_per_cust.get(cust_orig, {})
-        # 客户在哪些虚拟节点上
+        # 找该客户在调度中所占的虚拟节点（按当前 dw 排序，从最大者扣减）
         cust_nodes = [nd for nd, orig in self.n2o.items() if orig == cust_orig]
-        if cust_nodes:
-            new_w = sum(w for w, v in remaining.values())
-            new_v = sum(v for w, v in remaining.values())
-            for nd in cust_nodes:
-                self.dw[nd] = new_w / max(len(cust_nodes), 1)
-                self.dv[nd] = new_v / max(len(cust_nodes), 1)
+        cust_nodes.sort(key=lambda nd: self.dw.get(nd, 0), reverse=True)
+        rem_w = cancel_w_total; rem_v = cancel_v_total
+        for nd in cust_nodes:
+            if rem_w <= 0 and rem_v <= 0: break
+            dw_here = self.dw.get(nd, 0); dv_here = self.dv.get(nd, 0)
+            dec_w = min(rem_w, dw_here); dec_v = min(rem_v, dv_here)
+            self.dw[nd] = dw_here - dec_w
+            self.dv[nd] = dv_here - dec_v
+            rem_w -= dec_w; rem_v -= dec_v
 
         # 4) 待发车：重做问题1
         if state == 'pending':
@@ -389,27 +430,46 @@ class DynamicSchedule:
             log(f"    成本 {cost_before:.2f}→{cost_after:.2f}")
             return cost_after
 
-        # 5b) 客户全部订单都被取消 → 从该 trip 删除节点 + or-opt
+        # 5b) 客户全部订单都被取消 → 仅在"剩余路线"上删节点 + 局部重优化
         veh = self.vehicles[vi]; t = veh['trips'][ti]
-        new_r = [nd for nd in t['route']
-                 if not (self.n2o.get(nd, nd) == cust_orig and nd != 0)]
-        if len(new_r) < 3:
-            log(f"    路径仅余该客户 → 该 trip 删除")
-            veh['trips'].pop(ti)
-            if not veh['trips'] and not veh['done_trips']:
-                self.vehicles.pop(vi)
-        else:
-            r_opt = or_opt(new_r, self.dm, self.dw, self.dv,
-                           self.tw_s, self.tw_e, veh['vt'])
-            r_opt = two_opt(r_opt, self.dm, self.dw, self.dv,
-                            self.tw_s, self.tw_e, veh['vt'], passes=2)
+        locked, remaining = self._split_route_by_time(t, current_time)
+        # 在剩余路线中删除该客户节点
+        remaining_new = [nd for nd in remaining
+                         if not (self.n2o.get(nd, nd) == cust_orig)]
+        # 锁定前缀的最后一个节点是车辆当前位置（depot 或 已服务客户点）
+        cur_pos = locked[-1]
+        # 子路线起点用 cur_pos 接续，便于 eval_r 评估剩余成本
+        sub = [cur_pos] + remaining_new
+        if len(sub) < 3:
+            # 剩余仅余 depot/单点，整条 trip 视为已基本完成
+            full_route = locked + remaining_new
+            log(f"    在途 trip 剩余路线为空 → 直接收尾 "
+                f"{_fmt_route(t['route'], self.n2o)} → {_fmt_route(full_route, self.n2o)}")
+            if len(full_route) >= 2 and full_route[-1] != 0:
+                full_route = full_route + [0]
             c, tr, pen, co2, ok, et = eval_r(
-                r_opt, self.dm, self.dw, self.dv,
+                full_route, self.dm, self.dw, self.dv,
                 self.tw_s, self.tw_e, veh['vt'], t['start'])
-            t.update({'route': r_opt, 'cost': c, 'travel': tr,
+            t.update({'route': full_route, 'cost': c, 'travel': tr,
                       'penalty': pen, 'carbon': co2, 'end': et})
-            log(f"    在途 trip 删除节点+or-opt: "
-                f"{_fmt_route(t['route'], self.n2o)}")
+        else:
+            # 局部重优化：仅对"剩余路线"做 or-opt + 2-opt（已访问部分锁定）
+            sub_opt = or_opt(sub, self.dm, self.dw, self.dv,
+                             self.tw_s, self.tw_e, veh['vt'])
+            sub_opt = two_opt(sub_opt, self.dm, self.dw, self.dv,
+                              self.tw_s, self.tw_e, veh['vt'], passes=2)
+            # 确保子路线起点保持为 cur_pos（two_opt/or_opt 不会动头尾，但保险检查）
+            if sub_opt[0] != cur_pos:
+                sub_opt = [cur_pos] + [nd for nd in sub_opt if nd != cur_pos]
+            full_route = locked[:-1] + sub_opt
+            c, tr, pen, co2, ok, et = eval_r(
+                full_route, self.dm, self.dw, self.dv,
+                self.tw_s, self.tw_e, veh['vt'], t['start'])
+            t.update({'route': full_route, 'cost': c, 'travel': tr,
+                      'penalty': pen, 'carbon': co2, 'end': et})
+            log(f"    在途 trip 剩余路线删节点+局部重优化:")
+            log(f"      锁定前缀: {_fmt_route(locked, self.n2o)}")
+            log(f"      剩余优化: {_fmt_route(sub, self.n2o)} → {_fmt_route(sub_opt, self.n2o)}")
         cost_after, *_ = self.total_cost()
         self.event_log.append({
             'type': '订单取消', 'customer': cust_orig, 'time': current_time,
