@@ -12,8 +12,9 @@ sys.path.insert(0, _HERE)
 from solve_p1 import (
     load_data, eval_r, opt_start, two_opt, or_opt,
     relocate, swap, two_opt_star, intra_opt_all,
-    mk_trip, sched_cost,
-    VEHICLE_TYPES, STARTUP, WAIT_H, LATE_H, SVC_H,
+    mk_trip, sched_cost, construct_savings, best_vt,
+    tt, SVC_H,
+    VEHICLE_TYPES, STARTUP, WAIT_H, LATE_H, SVC_H as _SVC,
     GREEN_R, BASE, log
 )
 # 限行时段（与问题2一致）
@@ -88,7 +89,135 @@ class DynamicSchedule:
             for s in flex_sched
         ]
         self.event_log = []  # 事件记录
+        # 订单级数据：{客户原始ID: {订单号: (重量, 体积)}}
+        self.orders_per_cust = self._load_orders()
+        # 反查：{订单号: 客户原始ID}
+        self.order2cust = {oid: c for c, ods in self.orders_per_cust.items()
+                           for oid in ods}
         self._recompute_all_costs()
+
+    @staticmethod
+    def _load_orders():
+        """读取 订单信息_Sheet1.csv，返回 {客户ID: {订单号: (w,v)}}"""
+        try:
+            df = pd.read_csv(f'{BASE}/订单信息_Sheet1.csv', encoding='gbk')
+        except Exception:
+            return {}
+        df.columns = ['order_id', 'weight', 'volume', 'cust_id']
+        out = {}
+        for _, r in df.iterrows():
+            cid = int(r['cust_id'])
+            out.setdefault(cid, {})[int(r['order_id'])] = (
+                float(r['weight']), float(r['volume']))
+        return out
+
+    # ── 客户/订单状态判别 ────────────────────────
+    def _trip_state_for_cust(self, cust_orig, current_time):
+        """
+        返回 (state, vi, ti, node)：
+          state ∈ {'delivered','in_transit','pending','absent'}
+        当客户分散在多个 trip 时，优先级：delivered > in_transit > pending > absent
+        delivered: trip 已发车且经过该客户的离开时刻 < current_time
+        in_transit: trip 已发车但客户尚未服务完
+        pending: trip 未发车
+        absent: 不在任何路线
+        """
+        hits_pending = []; hits_in_transit = []; hits_delivered = []
+        for vi, veh in enumerate(self.vehicles):
+            for ti, t in enumerate(veh['trips']):
+                hs = [nd for nd in t['route'][1:-1]
+                      if self.n2o.get(nd, nd) == cust_orig]
+                if not hs: continue
+                if t['start'] > current_time:
+                    hits_pending.append((vi, ti, hs[0])); continue
+                leave_t = self._sim_leave_time(t, hs[0])
+                if leave_t is not None and leave_t < current_time:
+                    hits_delivered.append((vi, ti, hs[0]))
+                else:
+                    hits_in_transit.append((vi, ti, hs[0]))
+        if hits_delivered:
+            vi, ti, nd = hits_delivered[0]
+            return ('delivered', vi, ti, nd)
+        if hits_in_transit:
+            vi, ti, nd = hits_in_transit[0]
+            return ('in_transit', vi, ti, nd)
+        if hits_pending:
+            vi, ti, nd = hits_pending[0]
+            return ('pending', vi, ti, nd)
+        return ('absent', None, None, None)
+
+    def _sim_leave_time(self, trip, target_nd):
+        """模拟 trip 中 target_nd 的服务完成（离开）时刻"""
+        cur_t = trip['start']
+        r = trip['route']
+        for i in range(1, len(r)):
+            a, b = r[i-1], r[i]
+            cur_t += tt(self.dm[a][b], cur_t)
+            if b == 0: return cur_t
+            ws = self.tw_s.get(b, 0)
+            if cur_t < ws: cur_t = ws
+            cur_t += SVC_H
+            if b == target_nd: return cur_t
+        return None
+
+    # ── 重做问题1：对未发车 trip 整体重新优化 ────
+    def _redo_p1_on_pending(self, current_time, label=''):
+        """
+        对所有未发车 trip 应用问题1的"路线优化"算子链：
+          intra-opt → relocate → swap → two_opt_star → or-opt
+        保留现有 pending 结构（避免重建造成车辆数爆炸），但充分搜索
+        路线间客户迁移与交换的可能。已发车 trip 锁定不变。
+        """
+        idx_map = []
+        rvt = []
+        for vi, veh in enumerate(self.vehicles):
+            for ti, t in enumerate(veh['trips']):
+                if t['start'] > current_time:
+                    idx_map.append((vi, ti))
+                    rvt.append((list(t['route']), veh['vt']))
+        if len(rvt) < 1:
+            return
+        cost_before, *_ = self.total_cost()
+        try:
+            rvt = intra_opt_all(rvt, self.dm, self.dw, self.dv,
+                                self.tw_s, self.tw_e)
+            rvt = relocate(rvt, self.dm, self.dw, self.dv,
+                           self.tw_s, self.tw_e, tlim=2)
+            rvt = swap(rvt, self.dm, self.dw, self.dv,
+                       self.tw_s, self.tw_e, tlim=2)
+            rvt = two_opt_star(rvt, self.dm, self.dw, self.dv,
+                               self.tw_s, self.tw_e, tlim=2)
+            rvt = intra_opt_all(rvt, self.dm, self.dw, self.dv,
+                                self.tw_s, self.tw_e)
+        except Exception as e:
+            log(f"    [重做问题1{label}] 算子异常: {e}")
+        # 写回
+        new_pending = {}
+        for (vi, ti), (r, vt) in zip(idx_map, rvt):
+            new_pending.setdefault(vi, {})[ti] = r
+        for vi, veh in enumerate(self.vehicles):
+            if vi not in new_pending: continue
+            kept = []
+            for ti, t in enumerate(veh['trips']):
+                if ti in new_pending[vi]:
+                    r = new_pending[vi][ti]
+                    if len(r) < 3: continue
+                    st = max(opt_start(r, self.dm, self.tw_s),
+                             current_time + 0.05)
+                    c, tr, pen, co2, ok, et = eval_r(
+                        r, self.dm, self.dw, self.dv,
+                        self.tw_s, self.tw_e, veh['vt'], st)
+                    t.update({'route': r, 'start': st, 'end': et,
+                              'cost': c, 'travel': tr,
+                              'penalty': pen, 'carbon': co2})
+                    kept.append(t)
+                else:
+                    kept.append(t)
+            veh['trips'] = kept
+        self.vehicles = [v for v in self.vehicles if v['trips'] or v['done_trips']]
+        cost_after, *_ = self.total_cost()
+        log(f"    [重做问题1{label}] 总成本 {cost_before:.2f}→{cost_after:.2f} "
+            f"({cost_after-cost_before:+.2f})")
 
     def _recompute_all_costs(self):
         """重新计算所有路线成本"""
@@ -171,195 +300,292 @@ class DynamicSchedule:
             log(f"    [跨路线重优化{label}] 待发路段 {cost_before:.2f}→{cost_after:.2f} "
                 f"(节省{cost_before-cost_after:.2f})")
 
-    # ── 事件1：订单取消 ──────────────────────────
-    def event_cancel_order(self, target_cust_orig, current_time):
+    # ── 事件1：订单取消（订单级） ──────────────────
+    def event_cancel_order(self, order_id, current_time, kind='auto'):
         """
-        取消某原始客户ID的所有未送达订单
-        current_time: 事件发生时刻
+        kind='order'    : 视为订单号
+        kind='customer' : 视为客户原始ID（取消该客户全部订单）
+        kind='auto'     : 优先订单号；不存在则视为客户ID
         """
-        log(f"\n  [事件] 订单取消: 客户{target_cust_orig}, 当前时刻 {_fmt_h(current_time)}")
-        removed = 0
+        if kind == 'customer' or (kind == 'auto'
+                                   and order_id not in self.order2cust
+                                   and order_id in self.orders_per_cust):
+            cust_orig = order_id
+            cancel_orders = list(self.orders_per_cust.get(cust_orig, {}).keys())
+        elif kind == 'order' or order_id in self.order2cust:
+            cust_orig = self.order2cust[order_id]
+            cancel_orders = [order_id]
+        else:
+            log(f"\n  [事件] 订单取消: 订单/客户{order_id} 未找到")
+            return self.total_cost()[0]
+
+        log(f"\n  [事件] 订单取消: 订单{cancel_orders}({len(cancel_orders)}单) "
+            f"客户{cust_orig}, 当前时刻 {_fmt_h(current_time)}")
         cost_before, *_ = self.total_cost()
+        state, vi, ti, node = self._trip_state_for_cust(cust_orig, current_time)
 
-        for veh in self.vehicles:
-            new_trips = []
-            for t in veh['trips']:
-                if t['start'] <= current_time:
-                    # 已在途中，无法取消
-                    new_trips.append(t)
-                    continue
-                # 从路线中删除该客户节点
-                r = t['route']
-                nodes_to_remove = [nd for nd in r[1:-1]
-                                   if self.n2o.get(nd, nd) == target_cust_orig]
-                if not nodes_to_remove:
-                    new_trips.append(t)
-                    continue
-                new_r = [nd for nd in r if nd not in nodes_to_remove or nd == 0]
-                if len(new_r) < 3:
-                    # 路线为空，删除这趟
-                    removed += len(nodes_to_remove)
-                    log(f"    删除空路线 (原:{_fmt_route(r, self.n2o)})")
-                    continue
-                # 重新评估
-                c, tr, pen, co2, ok, et = eval_r(
-                    new_r, self.dm, self.dw, self.dv,
-                    self.tw_s, self.tw_e, veh['vt'], t['start'])
-                t_new = dict(t)
-                t_new.update({'route': new_r, 'cost': c, 'travel': tr,
-                              'penalty': pen, 'carbon': co2, 'end': et})
-                new_trips.append(t_new)
-                removed += len(nodes_to_remove)
-                log(f"    路线更新: {_fmt_route(r, self.n2o)} → {_fmt_route(new_r, self.n2o)}")
-            veh['trips'] = new_trips
+        # 1) 已送达：记录损失即可
+        if state == 'delivered':
+            for oid in cancel_orders:
+                self.orders_per_cust[cust_orig].pop(oid, None)
+                self.order2cust.pop(oid, None)
+            log(f"    客户{cust_orig}已送达 → 无法撤销，仅记录损失")
+            self.event_log.append({
+                'type': '订单取消', 'customer': cust_orig, 'time': current_time,
+                'state': 'delivered', 'cost_before': cost_before,
+                'cost_after': cost_before, 'note': '已送达不调整'})
+            return cost_before
 
-        # 清除空车
-        self.vehicles = [v for v in self.vehicles if v['trips'] or v['done_trips']]
-        # 取消后做一次跨路线重优化（被取消客户腾出容量，可能合并/迁移）
-        self._reoptimize_pending(current_time, label='-cancel')
+        # 2) 不在任何路线
+        if state == 'absent':
+            for oid in cancel_orders:
+                self.orders_per_cust[cust_orig].pop(oid, None)
+                self.order2cust.pop(oid, None)
+            log(f"    客户{cust_orig}不在当前调度路线中 → 无需调整")
+            return cost_before
+
+        # 3) 更新订单表 + 重新计算该客户聚合需求
+        for oid in cancel_orders:
+            self.orders_per_cust[cust_orig].pop(oid, None)
+            self.order2cust.pop(oid, None)
+        remaining = self.orders_per_cust.get(cust_orig, {})
+        # 客户在哪些虚拟节点上
+        cust_nodes = [nd for nd, orig in self.n2o.items() if orig == cust_orig]
+        if cust_nodes:
+            new_w = sum(w for w, v in remaining.values())
+            new_v = sum(v for w, v in remaining.values())
+            for nd in cust_nodes:
+                self.dw[nd] = new_w / max(len(cust_nodes), 1)
+                self.dv[nd] = new_v / max(len(cust_nodes), 1)
+
+        # 4) 待发车：重做问题1
+        if state == 'pending':
+            log(f"    客户{cust_orig}的 trip 未发车 → 触发重做问题1")
+            self._redo_p1_on_pending(current_time, label='-cancel/pending')
+            cost_after, *_ = self.total_cost()
+            self.event_log.append({
+                'type': '订单取消', 'customer': cust_orig, 'time': current_time,
+                'state': 'pending→redoP1',
+                'cost_before': cost_before, 'cost_after': cost_after})
+            log(f"    成本 {cost_before:.2f}→{cost_after:.2f} "
+                f"(节省{cost_before-cost_after:.2f})")
+            return cost_after
+
+        # 5) 在途：分支处理
+        # 5a) 仍有其它订单 → 路径不变，仅更新载重再评估
+        if remaining:
+            t = self.vehicles[vi]['trips'][ti]
+            c, tr, pen, co2, ok, et = eval_r(
+                t['route'], self.dm, self.dw, self.dv,
+                self.tw_s, self.tw_e, self.vehicles[vi]['vt'], t['start'])
+            t.update({'cost': c, 'travel': tr, 'penalty': pen,
+                      'carbon': co2, 'end': et})
+            log(f"    客户{cust_orig}仍有{len(remaining)}单未取消 → 路径不变，仅减需求")
+            cost_after, *_ = self.total_cost()
+            self.event_log.append({
+                'type': '订单取消', 'customer': cust_orig, 'time': current_time,
+                'state': 'in_transit/partial',
+                'cost_before': cost_before, 'cost_after': cost_after})
+            log(f"    成本 {cost_before:.2f}→{cost_after:.2f}")
+            return cost_after
+
+        # 5b) 客户全部订单都被取消 → 从该 trip 删除节点 + or-opt
+        veh = self.vehicles[vi]; t = veh['trips'][ti]
+        new_r = [nd for nd in t['route']
+                 if not (self.n2o.get(nd, nd) == cust_orig and nd != 0)]
+        if len(new_r) < 3:
+            log(f"    路径仅余该客户 → 该 trip 删除")
+            veh['trips'].pop(ti)
+            if not veh['trips'] and not veh['done_trips']:
+                self.vehicles.pop(vi)
+        else:
+            r_opt = or_opt(new_r, self.dm, self.dw, self.dv,
+                           self.tw_s, self.tw_e, veh['vt'])
+            r_opt = two_opt(r_opt, self.dm, self.dw, self.dv,
+                            self.tw_s, self.tw_e, veh['vt'], passes=2)
+            c, tr, pen, co2, ok, et = eval_r(
+                r_opt, self.dm, self.dw, self.dv,
+                self.tw_s, self.tw_e, veh['vt'], t['start'])
+            t.update({'route': r_opt, 'cost': c, 'travel': tr,
+                      'penalty': pen, 'carbon': co2, 'end': et})
+            log(f"    在途 trip 删除节点+or-opt: "
+                f"{_fmt_route(t['route'], self.n2o)}")
         cost_after, *_ = self.total_cost()
         self.event_log.append({
-            'type': '订单取消', 'customer': target_cust_orig,
-            'time': current_time, 'removed_nodes': removed,
-            'cost_before': cost_before, 'cost_after': cost_after,
-            'saving': cost_before - cost_after
-        })
-        log(f"    取消{removed}个节点, 成本 {cost_before:.2f}→{cost_after:.2f} (节省{cost_before-cost_after:.2f})")
+            'type': '订单取消', 'customer': cust_orig, 'time': current_time,
+            'state': 'in_transit/full',
+            'cost_before': cost_before, 'cost_after': cost_after})
+        log(f"    成本 {cost_before:.2f}→{cost_after:.2f} "
+            f"(节省{cost_before-cost_after:.2f})")
         return cost_after
 
     # ── 事件2：新增订单 ──────────────────────────
-    def event_add_order(self, new_cust_id, new_w, new_v, new_tw_s, new_tw_e,
-                        new_x, new_y, current_time):
+    def event_add_order(self, new_order_id, cust_orig, w, v,
+                        tw_s_new, tw_e_new, x, y, current_time):
         """
-        新增一个客户订单，用最小插入成本法找最优插入位置
-        new_cust_id: 新客户ID（唯一）
+        新增一个订单。规则：
+        1) 优先插入"原计划已带该客户订单的未发车 trip"（同客户合并，无需改路径）
+        2) 否则按最小插入成本法插入可容纳的未发车 trip + 局部 2-opt
+        3) 都失败 → 对未发车车辆和订单做"重做问题1"
+           （若有已返回 depot 的车辆优先复用 → _redo_p1_on_pending 已实现）
+        参数 cust_orig: 该订单关联的目标客户（可为现有客户ID或新客户ID）
         """
-        log(f"\n  [事件] 新增订单: 客户{new_cust_id}, w={new_w:.0f}kg, "
-            f"v={new_v:.3f}m³, TW=[{_fmt_h(new_tw_s)},{_fmt_h(new_tw_e)}], "
-            f"当前时刻 {_fmt_h(current_time)}")
+        log(f"\n  [事件] 新增订单: 订单{new_order_id} 客户{cust_orig} "
+            f"w={w:.0f}kg v={v:.3f}m³ TW=[{_fmt_h(tw_s_new)},{_fmt_h(tw_e_new)}] "
+            f"位置({x:.2f},{y:.2f}) 当前时刻 {_fmt_h(current_time)}")
         cost_before, *_ = self.total_cost()
+        is_new_cust = cust_orig not in self.orders_per_cust
 
-        # 扩展距离矩阵（新节点与depot及所有已有节点计算欧氏距离）
-        orig_x, orig_y = self.coords.get(0, (20, 20))
-        def dist_to_new(nd):
-            ox = self.coords.get(self.n2o.get(nd, nd), (0, 0))
-            return math.sqrt((ox[0] - new_x)**2 + (ox[1] - new_y)**2)
+        # 登记订单与客户
+        self.orders_per_cust.setdefault(cust_orig, {})[new_order_id] = (w, v)
+        self.order2cust[new_order_id] = cust_orig
 
-        # 更新数据
-        self.dw[new_cust_id] = new_w
-        self.dv[new_cust_id] = new_v
-        self.tw_s[new_cust_id] = new_tw_s
-        self.tw_e[new_cust_id] = new_tw_e
-        self.coords[new_cust_id] = (new_x, new_y)
-        self.n2o[new_cust_id] = new_cust_id
-        # 更新距离矩阵（仅对新节点行列）
-        n_old = self.dm.shape[0]
-        if new_cust_id >= n_old:
-            new_size = new_cust_id + 1
-            new_dm = np.zeros((new_size, new_size))
-            new_dm[:n_old, :n_old] = self.dm
-            # 填充新节点距离
-            for nd in range(new_size):
-                if nd == new_cust_id: continue
-                ox = self.coords.get(self.n2o.get(nd, nd), (0, 0))
-                d = math.sqrt((ox[0]-new_x)**2 + (ox[1]-new_y)**2)
-                new_dm[nd][new_cust_id] = d
-                new_dm[new_cust_id][nd] = d
-            self.dm = new_dm
+        if is_new_cust:
+            # 新客户：注册基础信息 + 距离矩阵
+            self.coords[cust_orig] = (x, y)
+            self.n2o[cust_orig] = cust_orig
+            self.dw[cust_orig] = w; self.dv[cust_orig] = v
+            self.tw_s[cust_orig] = tw_s_new; self.tw_e[cust_orig] = tw_e_new
+            n_old = self.dm.shape[0]
+            if cust_orig >= n_old:
+                new_size = cust_orig + 1
+                new_dm = np.zeros((new_size, new_size))
+                new_dm[:n_old, :n_old] = self.dm
+                for nd in range(new_size):
+                    if nd == cust_orig: continue
+                    ox = self.coords.get(self.n2o.get(nd, nd), (0, 0))
+                    d = math.sqrt((ox[0]-x)**2 + (ox[1]-y)**2)
+                    new_dm[nd][cust_orig] = d
+                    new_dm[cust_orig][nd] = d
+                self.dm = new_dm
+        else:
+            # 老客户：累加聚合需求到所有虚拟节点
+            cust_nodes = [nd for nd, orig in self.n2o.items() if orig == cust_orig]
+            for nd in cust_nodes or [cust_orig]:
+                self.dw[nd] = self.dw.get(nd, 0) + w / max(len(cust_nodes), 1)
+                self.dv[nd] = self.dv.get(nd, 0) + v / max(len(cust_nodes), 1)
 
-        # 寻找最佳插入位置
-        # 绿色区+限行时段 → 新客户必须由新能源车配送
-        new_in_green = _in_green(new_x, new_y)
-        ev_required = new_in_green and (new_tw_s < RESTRICT_E and new_tw_e > RESTRICT_S)
+        # ── 策略1：优先合并到"原计划已带该客户订单的未发车 trip" ──
+        if not is_new_cust:
+            for vi, veh in enumerate(self.vehicles):
+                for ti, t in enumerate(veh['trips']):
+                    if t['start'] <= current_time: continue
+                    if not any(self.n2o.get(nd, nd) == cust_orig
+                               for nd in t['route'][1:-1]): continue
+                    # 容量检查（含新增）
+                    w_cur = sum(self.dw.get(c, 0) for c in t['route'][1:-1])
+                    v_cur = sum(self.dv.get(c, 0) for c in t['route'][1:-1])
+                    if w_cur > veh['vt']['max_w'] or v_cur > veh['vt']['max_v']:
+                        log(f"    ✗ 同客户车辆{vi+1}容量超出，转策略2")
+                        break
+                    c, tr, pen, co2, ok, et = eval_r(
+                        t['route'], self.dm, self.dw, self.dv,
+                        self.tw_s, self.tw_e, veh['vt'], t['start'])
+                    t.update({'cost': c, 'travel': tr, 'penalty': pen,
+                              'carbon': co2, 'end': et})
+                    log(f"    ✓ 合并到 车辆{vi+1}趟{ti+1}（原已含该客户）路径不变")
+                    cost_after, *_ = self.total_cost()
+                    self.event_log.append({
+                        'type': '新增订单', 'customer': cust_orig,
+                        'time': current_time, 'state': 'merged',
+                        'cost_before': cost_before, 'cost_after': cost_after})
+                    log(f"    成本 {cost_before:.2f}→{cost_after:.2f}")
+                    return cost_after
+
+        # ── 策略2：按最小插入成本法插入可容纳的未发车 trip ──
+        # 绿色区+限行 → 仅允许 EV
+        in_green = _in_green(x, y)
+        ev_required = in_green and (tw_s_new < RESTRICT_E and tw_e_new > RESTRICT_S)
         if ev_required:
-            log(f"    新客户位于绿色区且需求时窗与限行时段重叠 → 仅允许新能源车")
-        best_cost_inc = 1e18
-        best_vi = -1; best_ti = -1; best_ins = -1; best_route = None
-
+            log(f"    新订单位于绿色区且时窗与限行重叠 → 仅允许新能源车承运")
+        target_node = cust_orig
+        best = (1e18, -1, -1, None, None)
         for vi, veh in enumerate(self.vehicles):
-            # 限行约束：燃油车被绿色区客户排除
-            if ev_required and not _is_ev(veh['vt']):
-                continue
+            if ev_required and not _is_ev(veh['vt']): continue
             for ti, t in enumerate(veh['trips']):
-                if t['start'] <= current_time: continue  # 已出发
-                # 若燃油车 trip 时段与限行重叠，绿色区客户不可插入
+                if t['start'] <= current_time: continue
                 if ev_required and not _is_ev(veh['vt']) \
-                   and _trip_overlaps_restrict(t['start'], t['end']):
-                    continue
-                r = t['route']
-                w_cur = sum(self.dw.get(c, 0) for c in r[1:-1])
-                v_cur = sum(self.dv.get(c, 0) for c in r[1:-1])
-                if w_cur + new_w > veh['vt']['max_w']: continue
-                if v_cur + new_v > veh['vt']['max_v']: continue
-                # 尝试每个插入位置
-                for ins in range(1, len(r)):
-                    new_r = r[:ins] + [new_cust_id] + r[ins:]
-                    c_new, tr_new, pen_new, co2_new, ok, et_new = eval_r(
+                   and _trip_overlaps_restrict(t['start'], t['end']): continue
+                w_cur = sum(self.dw.get(c, 0) for c in t['route'][1:-1])
+                v_cur = sum(self.dv.get(c, 0) for c in t['route'][1:-1])
+                if w_cur + w > veh['vt']['max_w']: continue
+                if v_cur + v > veh['vt']['max_v']: continue
+                for ins in range(1, len(t['route'])):
+                    new_r = t['route'][:ins] + [target_node] + t['route'][ins:]
+                    c2, tr2, pen2, co2_2, ok, et2 = eval_r(
                         new_r, self.dm, self.dw, self.dv,
                         self.tw_s, self.tw_e, veh['vt'], t['start'])
                     if not ok: continue
-                    inc = (tr_new + pen_new) - (t['travel'] + t['penalty'])
-                    if inc < best_cost_inc:
-                        best_cost_inc = inc
-                        best_vi = vi; best_ti = ti; best_ins = ins
-                        best_route = (new_r, t['start'], et_new, c_new, tr_new, pen_new, co2_new)
+                    inc = (tr2 + pen2) - (t['travel'] + t['penalty'])
+                    if inc < best[0]:
+                        best = (inc, vi, ti, new_r,
+                                (c2, tr2, pen2, co2_2, et2))
+        if best[1] >= 0:
+            inc, vi, ti, new_r, (c2, tr2, pen2, co2_2, et2) = best
+            old_r = self.vehicles[vi]['trips'][ti]['route']
+            self.vehicles[vi]['trips'][ti].update({
+                'route': new_r, 'end': et2, 'cost': c2,
+                'travel': tr2, 'penalty': pen2, 'carbon': co2_2})
+            # 局部 2-opt 优化插入后的路径
+            r_opt = two_opt(new_r, self.dm, self.dw, self.dv,
+                            self.tw_s, self.tw_e, self.vehicles[vi]['vt'], passes=2)
+            c2, tr2, pen2, co2_2, ok, et2 = eval_r(
+                r_opt, self.dm, self.dw, self.dv, self.tw_s, self.tw_e,
+                self.vehicles[vi]['vt'],
+                self.vehicles[vi]['trips'][ti]['start'])
+            self.vehicles[vi]['trips'][ti].update({
+                'route': r_opt, 'end': et2, 'cost': c2,
+                'travel': tr2, 'penalty': pen2, 'carbon': co2_2})
+            log(f"    ✓ 最小成本插入 车辆{vi+1}趟{ti+1}: "
+                f"{_fmt_route(old_r, self.n2o)} → {_fmt_route(r_opt, self.n2o)} "
+                f"(增量{inc:+.2f})")
+            cost_after, *_ = self.total_cost()
+            self.event_log.append({
+                'type': '新增订单', 'customer': cust_orig,
+                'time': current_time, 'state': 'inserted',
+                'cost_before': cost_before, 'cost_after': cost_after})
+            log(f"    成本 {cost_before:.2f}→{cost_after:.2f} "
+                f"({cost_after-cost_before:+.2f})")
+            return cost_after
 
-        if best_vi >= 0:
-            # 插入
-            new_r, st, et, c, tr, pen, co2 = best_route
-            old_r = self.vehicles[best_vi]['trips'][best_ti]['route']
-            self.vehicles[best_vi]['trips'][best_ti].update({
-                'route': new_r, 'end': et, 'cost': c,
-                'travel': tr, 'penalty': pen, 'carbon': co2})
-            log(f"    插入到 车辆{best_vi+1}趟{best_ti+1}: "
-                f"{_fmt_route(old_r, self.n2o)} → {_fmt_route(new_r, self.n2o)}")
-            log(f"    成本增量: {best_cost_inc:+.2f}")
+        # ── 策略3：都失败 → 对未发车 + 该订单一起重做问题1 ──
+        log(f"    ✗ 无可插入位置 → 触发重做问题1（含已返depot车辆复用）")
+        # 把新客户加入一个"占位"trip，使其纳入 redo
+        used_count = {}
+        for vh in self.vehicles:
+            used_count[vh['vt']['id']] = used_count.get(vh['vt']['id'], 0) + 1
+        if ev_required:
+            vt_pick = _pick_ev_vt(w, v, used_count) or VEHICLE_TYPES[0]
         else:
-            # 无法插入已有路线，新开一辆车
-            used_count = {}
-            for v in self.vehicles:
-                used_count[v['vt']['id']] = used_count.get(v['vt']['id'], 0) + 1
-            if ev_required:
-                vt = _pick_ev_vt(new_w, new_v, used_count)
-                if vt is None:
-                    log(f"    ⚠ EV额度耗尽，回退至最小燃油车（违规将记录）")
-                    vt = next((v for v in VEHICLE_TYPES
-                               if v['type']=='fuel' and v['max_w']>=new_w and v['max_v']>=new_v),
-                              VEHICLE_TYPES[0])
-                else:
-                    log(f"    新开新能源车 {vt['name']}（绿色区合规）")
-            else:
-                vt = next((v for v in VEHICLE_TYPES
-                           if v['max_w'] >= new_w and v['max_v'] >= new_v), VEHICLE_TYPES[0])
-            st = opt_start([0, new_cust_id, 0], self.dm, self.tw_s)
-            st = max(st, current_time + 0.5)
-            c, tr, pen, co2, ok, et = eval_r(
-                [0, new_cust_id, 0], self.dm, self.dw, self.dv,
-                self.tw_s, self.tw_e, vt, st)
-            new_trip = {'route': [0, new_cust_id, 0], 'vt': vt, 'start': st,
-                        'end': et, 'cost': c, 'travel': tr, 'penalty': pen, 'carbon': co2}
-            self.vehicles.append({'vt': vt, 'trips': [new_trip], 'done_trips': []})
-            log(f"    新开一辆 {vt['name']} 服务新客户{new_cust_id}")
-            best_cost_inc = STARTUP + tr + pen
-
-        # 新订单插入后跨路线再均衡（启用）
-        self._reoptimize_pending(current_time, label='-add')
+            vt_pick = next((vh for vh in VEHICLE_TYPES
+                            if vh['max_w'] >= w and vh['max_v'] >= v),
+                           VEHICLE_TYPES[0])
+        st0 = max(opt_start([0, target_node, 0], self.dm, self.tw_s),
+                  current_time + 0.05)
+        c0, tr0, pen0, co20, ok0, et0 = eval_r(
+            [0, target_node, 0], self.dm, self.dw, self.dv,
+            self.tw_s, self.tw_e, vt_pick, st0)
+        self.vehicles.append({'vt': vt_pick, 'trips': [{
+            'route': [0, target_node, 0], 'vt': vt_pick, 'start': st0, 'end': et0,
+            'cost': c0, 'travel': tr0, 'penalty': pen0, 'carbon': co20}],
+            'done_trips': []})
+        self._redo_p1_on_pending(current_time, label='-add/redoP1')
         cost_after, *_ = self.total_cost()
-        actual_inc = cost_after - cost_before
         self.event_log.append({
-            'type': '新增订单', 'customer': new_cust_id,
-            'time': current_time, 'cost_before': cost_before,
-            'cost_after': cost_after, 'cost_inc': actual_inc
-        })
-        log(f"    成本 {cost_before:.2f}→{cost_after:.2f} (增加{actual_inc:.2f})")
+            'type': '新增订单', 'customer': cust_orig,
+            'time': current_time, 'state': 'redoP1',
+            'cost_before': cost_before, 'cost_after': cost_after})
+        log(f"    成本 {cost_before:.2f}→{cost_after:.2f} "
+            f"({cost_after-cost_before:+.2f})")
         return cost_after
 
     # ── 事件3：配送地址变更 ──────────────────────
     def event_address_change(self, cust_orig, new_x, new_y, current_time):
         """
-        某客户配送地址变更，更新坐标+距离矩阵，对涉及路线重做2-opt。
-        若新地址跨入绿色区且其时窗与限行重叠，会把该节点从燃油车路线
-        "弹出"重新插入新能源车路线，避免违规。
+        某客户配送地址变更：
+        - 该客户不在调度中 / 已送达 → 仅更新坐标
+        - trip 未发车 → 重做问题1
+        - trip 在途 → 对该车剩余路线做优化（2-opt / or-opt）
         """
         log(f"\n  [事件] 地址变更: 客户{cust_orig} → ({new_x:.2f},{new_y:.2f}), "
             f"当前时刻 {_fmt_h(current_time)}")
@@ -368,11 +594,9 @@ class DynamicSchedule:
         was_in_green = _in_green(old_x, old_y)
         now_in_green = _in_green(new_x, new_y)
 
-        # 更新坐标
+        # 更新坐标 + 距离矩阵
         self.coords[cust_orig] = (new_x, new_y)
-        # 更新虚拟节点坐标映射（n2o中所有映射到cust_orig的节点）
         affected_nodes = [nd for nd, orig in self.n2o.items() if orig == cust_orig]
-        # 重新计算距离矩阵（影响行列）
         n = self.dm.shape[0]
         for nd in affected_nodes:
             if nd >= n: continue
@@ -382,50 +606,57 @@ class DynamicSchedule:
                 self.dm[nd][other] = d
                 self.dm[other][nd] = d
 
-        # 对含该客户的未出发路线做局部重优化
-        for veh in self.vehicles:
-            for ti, t in enumerate(veh['trips']):
-                if t['start'] <= current_time: continue
-                if not any(self.n2o.get(nd, nd) == cust_orig for nd in t['route'][1:-1]):
-                    continue
-                # 重新评估成本
-                r_new = two_opt(t['route'], self.dm, self.dw, self.dv,
-                                self.tw_s, self.tw_e, veh['vt'], passes=2)
-                c, tr, pen, co2, ok, et = eval_r(
-                    r_new, self.dm, self.dw, self.dv,
-                    self.tw_s, self.tw_e, veh['vt'], t['start'])
-                old_r = t['route']
-                t.update({'route': r_new, 'end': et, 'cost': c,
-                          'travel': tr, 'penalty': pen, 'carbon': co2})
-                log(f"    路线重优化: {_fmt_route(old_r, self.n2o)} → {_fmt_route(r_new, self.n2o)}")
+        state, vi, ti, node = self._trip_state_for_cust(cust_orig, current_time)
+        if state in ('absent', 'delivered'):
+            log(f"    客户{cust_orig}状态={state} → 仅更新坐标，不调路线")
+            cost_after, *_ = self.total_cost()
+            self.event_log.append({
+                'type': '地址变更', 'customer': cust_orig, 'time': current_time,
+                'state': state, 'old_pos': (old_x, old_y), 'new_pos': (new_x, new_y),
+                'cost_before': cost_before, 'cost_after': cost_after})
+            log(f"    成本 {cost_before:.2f}→{cost_after:.2f}")
+            return cost_after
 
-        # 跨绿色区检查：若新址进入绿色区，且其当前承运为燃油车 +
-        # 该 trip 时段与限行[8,16]重叠 → 必须迁到 EV
+        if state == 'pending':
+            log(f"    trip 未发车 → 触发重做问题1")
+            self._redo_p1_on_pending(current_time, label='-addr/pending')
+        else:  # in_transit → 对该车剩余路线做优化
+            veh = self.vehicles[vi]; t = veh['trips'][ti]
+            old_r = t['route']
+            r_opt = two_opt(old_r, self.dm, self.dw, self.dv,
+                            self.tw_s, self.tw_e, veh['vt'], passes=3)
+            r_opt = or_opt(r_opt, self.dm, self.dw, self.dv,
+                           self.tw_s, self.tw_e, veh['vt'])
+            c, tr, pen, co2, ok, et = eval_r(
+                r_opt, self.dm, self.dw, self.dv,
+                self.tw_s, self.tw_e, veh['vt'], t['start'])
+            t.update({'route': r_opt, 'cost': c, 'travel': tr,
+                      'penalty': pen, 'carbon': co2, 'end': et})
+            log(f"    在途 trip 优化: {_fmt_route(old_r, self.n2o)} → "
+                f"{_fmt_route(r_opt, self.n2o)}")
+
+        # 跨绿色区检查（限行约束）
         if (not was_in_green) and now_in_green:
-            need_migrate = False
             for veh in self.vehicles:
                 if _is_ev(veh['vt']): continue
                 for t in veh['trips']:
                     if t['start'] <= current_time: continue
                     if not _trip_overlaps_restrict(t['start'], t['end']): continue
-                    if any(self.n2o.get(nd, nd) == cust_orig for nd in t['route'][1:-1]):
-                        need_migrate = True; break
-                if need_migrate: break
-            if need_migrate:
-                migrated = self._migrate_to_ev(cust_orig, current_time)
-                if migrated:
-                    log(f"    地址跨入绿色区限行段 → 节点已迁移到新能源车路线")
-        # 事件后跨路线重优化
-        self._reoptimize_pending(current_time, label='-addr')
+                    if any(self.n2o.get(nd, nd) == cust_orig
+                           for nd in t['route'][1:-1]):
+                        if self._migrate_to_ev(cust_orig, current_time):
+                            log(f"    地址跨入绿色区限行段 → 已迁移到EV路线")
+                        break
+                else: continue
+                break
 
         cost_after, *_ = self.total_cost()
         self.event_log.append({
-            'type': '地址变更', 'customer': cust_orig,
-            'time': current_time, 'old_pos': (old_x, old_y),
-            'new_pos': (new_x, new_y),
-            'cost_before': cost_before, 'cost_after': cost_after
-        })
-        log(f"    成本 {cost_before:.2f}→{cost_after:.2f} (变化{cost_after-cost_before:+.2f})")
+            'type': '地址变更', 'customer': cust_orig, 'time': current_time,
+            'state': state, 'old_pos': (old_x, old_y), 'new_pos': (new_x, new_y),
+            'cost_before': cost_before, 'cost_after': cost_after})
+        log(f"    成本 {cost_before:.2f}→{cost_after:.2f} "
+            f"({cost_after-cost_before:+.2f})")
         return cost_after
 
     def _migrate_to_ev(self, cust_orig, current_time):
@@ -507,48 +738,88 @@ class DynamicSchedule:
     # ── 事件4：时间窗调整 ─────────────────────────
     def event_tw_adjust(self, cust_orig, new_tw_s, new_tw_e, current_time):
         """
-        某客户时间窗调整，重新评估受影响路线，必要时重排序
+        某客户时间窗调整：
+        - 不在调度 / 已送达 → 仅更新数据
+        - 未发车 → 重做问题1
+        - 在途：
+            · 时间窗变宽 → 仅重新评估惩罚（通常下降），路线不变
+            · 时间窗变窄/前移/后移 → 看是否赶得上：
+                · 赶得上 → 重新评估即可
+                · 赶不上 → 对该车剩余路线做 2-opt
         """
         log(f"\n  [事件] 时间窗调整: 客户{cust_orig} → "
             f"[{_fmt_h(new_tw_s)},{_fmt_h(new_tw_e)}], "
             f"当前时刻 {_fmt_h(current_time)}")
         cost_before, *_ = self.total_cost()
-        affected_nodes = [nd for nd, orig in self.n2o.items() if orig == cust_orig]
-        for nd in affected_nodes:
-            self.tw_s[nd] = new_tw_s
-            self.tw_e[nd] = new_tw_e
-        # 直接更新原始ID的时间窗
-        self.tw_s[cust_orig] = new_tw_s
-        self.tw_e[cust_orig] = new_tw_e
+        old_s = self.tw_s.get(cust_orig, 0)
+        old_e = self.tw_e.get(cust_orig, 24)
+        wider = (new_tw_s <= old_s and new_tw_e >= old_e)
 
-        # 对含该客户的未出发路线重评估
-        for veh in self.vehicles:
-            for ti, t in enumerate(veh['trips']):
-                if t['start'] <= current_time: continue
-                if not any(self.n2o.get(nd, nd) == cust_orig for nd in t['route'][1:-1]):
-                    continue
-                # 尝试2-opt改善惩罚
-                r_new = two_opt(t['route'], self.dm, self.dw, self.dv,
-                                self.tw_s, self.tw_e, veh['vt'], passes=3)
+        affected_nodes = [nd for nd, orig in self.n2o.items() if orig == cust_orig]
+        for nd in affected_nodes + [cust_orig]:
+            self.tw_s[nd] = new_tw_s; self.tw_e[nd] = new_tw_e
+
+        state, vi, ti, node = self._trip_state_for_cust(cust_orig, current_time)
+        if state in ('absent', 'delivered'):
+            log(f"    客户{cust_orig}状态={state} → 仅更新数据")
+            cost_after, *_ = self.total_cost()
+            self.event_log.append({
+                'type': '时间窗调整', 'customer': cust_orig, 'time': current_time,
+                'state': state, 'new_tw': (new_tw_s, new_tw_e),
+                'cost_before': cost_before, 'cost_after': cost_after})
+            log(f"    成本 {cost_before:.2f}→{cost_after:.2f}")
+            return cost_after
+
+        if state == 'pending':
+            log(f"    trip 未发车 → 触发重做问题1")
+            self._redo_p1_on_pending(current_time, label='-tw/pending')
+        else:  # in_transit
+            veh = self.vehicles[vi]; t = veh['trips'][ti]
+            if wider:
+                # 时窗变宽 → 仅重新评估
                 c, tr, pen, co2, ok, et = eval_r(
-                    r_new, self.dm, self.dw, self.dv,
+                    t['route'], self.dm, self.dw, self.dv,
                     self.tw_s, self.tw_e, veh['vt'], t['start'])
                 old_pen = t['penalty']
-                t.update({'route': r_new, 'end': et, 'cost': c,
-                          'travel': tr, 'penalty': pen, 'carbon': co2})
-                log(f"    路线重评估: {_fmt_route(r_new, self.n2o)} "
-                    f"惩罚 {old_pen:.2f}→{pen:.2f}")
-
-        # 时间窗变化后跨路线再均衡
-        self._reoptimize_pending(current_time, label='-tw')
+                t.update({'cost': c, 'travel': tr, 'penalty': pen,
+                          'carbon': co2, 'end': et})
+                log(f"    时窗变宽 → 仅重评估 惩罚 {old_pen:.2f}→{pen:.2f}")
+            else:
+                # 收窄/前移/后移：先看赶得上吗
+                arrive = self._sim_leave_time(t, node)
+                if arrive is None: arrive = 1e9
+                arrive_only = arrive - SVC_H
+                can_meet = (new_tw_s <= arrive_only <= new_tw_e)
+                if can_meet:
+                    c, tr, pen, co2, ok, et = eval_r(
+                        t['route'], self.dm, self.dw, self.dv,
+                        self.tw_s, self.tw_e, veh['vt'], t['start'])
+                    old_pen = t['penalty']
+                    t.update({'cost': c, 'travel': tr, 'penalty': pen,
+                              'carbon': co2, 'end': et})
+                    log(f"    时窗收窄但赶得上({_fmt_h(arrive_only)} ∈"
+                        f" [{_fmt_h(new_tw_s)},{_fmt_h(new_tw_e)}]) → 仅重评估")
+                else:
+                    log(f"    时窗收窄且赶不上({_fmt_h(arrive_only)} ∉"
+                        f" [{_fmt_h(new_tw_s)},{_fmt_h(new_tw_e)}]) → 该车 2-opt")
+                    old_r = t['route']
+                    r_new = two_opt(old_r, self.dm, self.dw, self.dv,
+                                    self.tw_s, self.tw_e, veh['vt'], passes=3)
+                    c, tr, pen, co2, ok, et = eval_r(
+                        r_new, self.dm, self.dw, self.dv,
+                        self.tw_s, self.tw_e, veh['vt'], t['start'])
+                    t.update({'route': r_new, 'cost': c, 'travel': tr,
+                              'penalty': pen, 'carbon': co2, 'end': et})
+                    log(f"    路线重排: {_fmt_route(old_r, self.n2o)} → "
+                        f"{_fmt_route(r_new, self.n2o)}")
 
         cost_after, *_ = self.total_cost()
         self.event_log.append({
-            'type': '时间窗调整', 'customer': cust_orig,
-            'time': current_time, 'new_tw': (new_tw_s, new_tw_e),
-            'cost_before': cost_before, 'cost_after': cost_after
-        })
-        log(f"    成本 {cost_before:.2f}→{cost_after:.2f} (变化{cost_after-cost_before:+.2f})")
+            'type': '时间窗调整', 'customer': cust_orig, 'time': current_time,
+            'state': state, 'new_tw': (new_tw_s, new_tw_e),
+            'cost_before': cost_before, 'cost_after': cost_after})
+        log(f"    成本 {cost_before:.2f}→{cost_after:.2f} "
+            f"({cost_after-cost_before:+.2f})")
         return cost_after
 
 
@@ -712,97 +983,86 @@ if __name__ == '__main__':
     ds_snapshot = copy.deepcopy(ds)  # 保存初始状态用于对比可视化
 
     # ── 数据驱动选择事件触发对象 ─────────────────
-    # 事件1（取消）：选未来出发、需求量最大且非绿色区的客户 → 取消后释放容量大、无绿区/EV纠葛
-    cancel_cust = None; cancel_w = -1; cancel_route_start = None
+    # 选择策略：覆盖"在途"与"未发车"两种状态分支
+    # 事件1（取消订单）：选 10:30 时刻 trip 已发车（in_transit）的客户
+    cancel_target = None
     for veh in ds.vehicles:
         for t in veh['trips']:
-            if t['start'] <= 10.5: continue
+            if not (8.5 <= t['start'] <= 10.4): continue
             for nd in t['route'][1:-1]:
-                orig = n2o.get(nd, nd)
-                if orig in green_orig: continue
-                w = dw.get(nd, 0)
-                if w > cancel_w:
-                    cancel_w = w; cancel_cust = orig; cancel_route_start = t['start']
-    # 事件2（新增）：在绿色区内构造紧急订单 → 触发"必须EV"约束
-    add_x, add_y = 4.0, -3.0      # |.|=5km, 在绿色区内
-    add_w, add_v = 350.0, 1.0
-    add_tw = (10.0, 13.0)         # 完全落在限行段内
-    # 事件3（地址变更）：选当前在绿色区外、燃油车承运的客户，把它移入绿色区 → 触发EV迁移
-    addr_cust = None; addr_old = None
+                orig = ds.n2o.get(nd, nd)
+                if orig in ds.orders_per_cust and orig not in green_orig:
+                    cancel_target = orig; break
+            if cancel_target: break
+        if cancel_target: break
+
+    # 事件2（新增订单）：在绿色区内构造新订单 → 触发 EV 约束 + 走"插入或重做P1"
+    add_x, add_y, add_w, add_v = 4.0, -3.0, 350.0, 1.0
+    add_tw = (10.0, 13.0)
+    new_order_id = max(ds.order2cust.keys(), default=0) + 1
+    new_cust_id = 999
+
+    # 事件3（地址变更）：选 trip 未发车（pending）的客户 → 走"重做问题1"
+    addr_target = None
     for veh in ds.vehicles:
         if _is_ev(veh['vt']): continue
         for t in veh['trips']:
-            if t['start'] <= 13.5: continue
-            if not _trip_overlaps_restrict(t['start'], t['end']): continue
+            if t['start'] <= 13.6: continue
             for nd in t['route'][1:-1]:
-                orig = n2o.get(nd, nd)
+                orig = ds.n2o.get(nd, nd)
                 if orig in green_orig: continue
-                if orig == cancel_cust: continue   # 避免与取消事件重叠
+                if orig in (cancel_target,): continue
                 px, py = coords.get(orig, (0, 0))
                 if not _in_green(px, py):
-                    addr_cust = orig; addr_old = (px, py); break
-            if addr_cust: break
-        if addr_cust: break
-    # 事件4（时间窗调整）：选 14:00 之后才出发、且当前惩罚最大的 trip 中的某客户
-    tw_cust = None; tw_pen_max = -1
+                    addr_target = orig; break
+            if addr_target: break
+        if addr_target: break
+
+    # 事件4（时间窗收窄）：选 14:00 时刻 trip 在途的客户 → 走"在途/收窄/赶得上或赶不上"
+    tw_target = None
     for veh in ds.vehicles:
         for t in veh['trips']:
-            if t['start'] <= 14.0: continue
-            if t['penalty'] <= tw_pen_max: continue
+            if not (12.0 <= t['start'] <= 13.99): continue
             for nd in t['route'][1:-1]:
-                orig = n2o.get(nd, nd)
-                if orig in (cancel_cust, addr_cust): continue
-                tw_pen_max = t['penalty']
-                tw_cust = orig; break
+                orig = ds.n2o.get(nd, nd)
+                if orig in (cancel_target, addr_target): continue
+                tw_target = orig; break
+            if tw_target: break
+        if tw_target: break
 
-    log(f"\n[事件参数 - 数据驱动]")
-    log(f"  取消: 客户{cancel_cust} (需求{cancel_w:.0f}kg, 路线{_fmt_h(cancel_route_start) if cancel_route_start else '?'}出发)")
-    log(f"  新增: 客户999 ({add_x},{add_y}) 在绿色区内, w={add_w}kg, TW={add_tw}")
-    log(f"  地址变更: 客户{addr_cust} 从{addr_old} → 移入绿色区")
-    log(f"  时间窗调整: 客户{tw_cust} (当前路线惩罚{tw_pen_max:.2f}元)")
+    log(f"\n[事件参数 - 数据驱动 + 状态覆盖]")
+    log(f"  取消: 客户{cancel_target} 的全部订单 (10:30 时已在途)")
+    log(f"  新增: 订单{new_order_id} 客户{new_cust_id} 绿色区内 (11:00)")
+    log(f"  地址变更: 客户{addr_target} 移入绿色区 (13:30 时未发车 → 重做P1)")
+    log(f"  时间窗调整: 客户{tw_target} 收窄到原均值±0.3h (14:00 时在途)")
 
     log("\n" + "="*60)
-    log("演示场景一：订单取消 + 新增订单")
+    log("演示场景一：订单取消(在途) + 新增订单(绿色区)")
     log("="*60)
 
-    # ── 场景一 Step1: 10:30 取消大需求订单
-    log(f"\n── Step1: 10:30 客户{cancel_cust} 取消大需求订单（释放容量）")
-    if cancel_cust is not None:
-        ds.event_cancel_order(target_cust_orig=cancel_cust, current_time=10.5)
-
-    # ── 场景一 Step2: 11:00 新增绿色区紧急订单 → 触发EV约束
-    log(f"\n── Step2: 11:00 新增绿色区紧急订单（必须由新能源车配送）")
+    if cancel_target is not None:
+        ds.event_cancel_order(order_id=cancel_target, current_time=10.5,
+                              kind='customer')
     ds.event_add_order(
-        new_cust_id=999,
-        new_w=add_w, new_v=add_v,
-        new_tw_s=add_tw[0], new_tw_e=add_tw[1],
-        new_x=add_x, new_y=add_y,
-        current_time=11.0
+        new_order_id=new_order_id, cust_orig=new_cust_id,
+        w=add_w, v=add_v, tw_s_new=add_tw[0], tw_e_new=add_tw[1],
+        x=add_x, y=add_y, current_time=11.0
     )
 
     log("\n" + "="*60)
-    log("演示场景二：地址变更 + 时间窗调整")
+    log("演示场景二：地址变更(未发车→重做P1) + 时间窗收窄(在途)")
     log("="*60)
 
-    # ── 场景二 Step3: 13:30 客户地址变更进入绿色区 → 触发EV迁移
-    log(f"\n── Step3: 13:30 客户{addr_cust}地址变更（区外→区内，触发EV迁移）")
-    if addr_cust is not None:
-        # 移到 (3, 4) 这种确保在绿色区内（半径5km）的位置
+    if addr_target is not None:
         ds.event_address_change(
-            cust_orig=addr_cust,
-            new_x=3.0, new_y=4.0,
-            current_time=13.5
-        )
-
-    # ── 场景二 Step4: 14:00 高惩罚客户时间窗整体推迟2h
-    log(f"\n── Step4: 14:00 客户{tw_cust} 时间窗推迟2小时（缓解惩罚）")
-    if tw_cust is not None:
-        orig_s = tw_s.get(tw_cust, 0)
-        orig_e = tw_e.get(tw_cust, 24)
+            cust_orig=addr_target, new_x=3.0, new_y=4.0, current_time=13.5)
+    if tw_target is not None:
+        orig_s = tw_s.get(tw_target, 0)
+        orig_e = tw_e.get(tw_target, 24)
+        mid = (orig_s + orig_e) / 2
         ds.event_tw_adjust(
-            cust_orig=tw_cust,
-            new_tw_s=orig_s + 2.0,
-            new_tw_e=orig_e + 2.0,
+            cust_orig=tw_target,
+            new_tw_s=mid - 0.3, new_tw_e=mid + 0.3,
             current_time=14.0
         )
 
