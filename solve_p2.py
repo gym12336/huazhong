@@ -29,6 +29,9 @@ random.seed(42); np.random.seed(42)
 
 RESTRICT_S, RESTRICT_E = 8.0, 16.0
 
+def _fh(h):
+    return f'{int(h)}:{int(round((h%1)*60)):02d}'
+
 # ── 约束判断 ─────────────────────────────────────
 def route_in_green(route, green_orig, n2o):
     return any(n2o.get(c, c) in green_orig for c in route[1:-1])
@@ -93,19 +96,66 @@ def fix_violations(sched, dm, dw, dv, tw_s, tw_e, green_orig, n2o):
                 fixed += 1; swapped = True; break
 
         if not swapped:
-            # EV不够，把违规trip的出发时间推迟到 RESTRICT_E（限行结束时间）
+            # EV不够，处理违规trip
+            new_trips = list(veh['trips'])
             for ti in viol_tis:
                 t = veh['trips'][ti]
-                new_start = max(t['start'], RESTRICT_E + 0.1)  # 16:06
-                c2, tr2, pen2, co2, ok, et2 = eval_r(
-                    t['route'], dm, dw, dv, tw_s, tw_e, veh['vt'], new_start)
-                if ok:
-                    veh['trips'][ti] = {'route': t['route'], 'vt': veh['vt'],
-                                        'start': new_start, 'end': et2,
-                                        'cost': c2, 'travel': tr2,
-                                        'penalty': pen2, 'carbon': co2}
+                orig_start = t['start']
+                orig_pen = t['penalty']
+                # 方案A：整体推迟到 16:06
+                new_start_A = max(orig_start, RESTRICT_E + 0.1)
+                c_A, tr_A, pen_A, co2_A, ok_A, et_A = eval_r(
+                    t['route'], dm, dw, dv, tw_s, tw_e, veh['vt'], new_start_A)
+                cost_inc_A = (tr_A + pen_A) - (t['travel'] + t['penalty']) if ok_A else 1e18
+
+                # 方案B：拆趟（绿/非绿分开），同一辆车两趟
+                # 仅当推迟惩罚激增 > 500 时尝试，避免无谓开销
+                cost_inc_B = 1e18; B_data = None
+                if ok_A and (pen_A - orig_pen) > 500:
+                    inner = t['route'][1:-1]
+                    g_nodes = [c for c in inner if n2o.get(c, c) in green_orig]
+                    ng_nodes = [c for c in inner if n2o.get(c, c) not in green_orig]
+                    # 必须两段都非空才有意义
+                    if g_nodes and ng_nodes:
+                        # 非绿段保持原时段
+                        r_ng = [0] + ng_nodes + [0]
+                        st_ng = opt_start(r_ng, dm, tw_s)
+                        c_ng, tr_ng, pen_ng, co2_ng, ok_ng, et_ng = eval_r(
+                            r_ng, dm, dw, dv, tw_s, tw_e, veh['vt'], st_ng)
+                        # 绿段推迟到 16:06；尽量晚走一点等非绿段返回
+                        st_g = max(RESTRICT_E + 0.1, et_ng + 0.05) if ok_ng else RESTRICT_E + 0.1
+                        r_g = [0] + g_nodes + [0]
+                        c_g, tr_g, pen_g, co2_g, ok_g, et_g = eval_r(
+                            r_g, dm, dw, dv, tw_s, tw_e, veh['vt'], st_g)
+                        if ok_ng and ok_g:
+                            B_total = (tr_ng + pen_ng) + (tr_g + pen_g)
+                            cost_inc_B = B_total - (t['travel'] + t['penalty'])
+                            B_data = {
+                                'ng': {'route': r_ng, 'vt': veh['vt'], 'start': st_ng,
+                                       'end': et_ng, 'cost': c_ng, 'travel': tr_ng,
+                                       'penalty': pen_ng, 'carbon': co2_ng},
+                                'g':  {'route': r_g, 'vt': veh['vt'], 'start': st_g,
+                                       'end': et_g, 'cost': c_g, 'travel': tr_g,
+                                       'penalty': pen_g, 'carbon': co2_g},
+                            }
+
+                # 选成本增量更小的方案
+                if cost_inc_B < cost_inc_A and B_data is not None:
+                    # 拆趟：用拆出的两趟替换原 trip
+                    new_trips[ti] = B_data['ng']
+                    new_trips.append(B_data['g'])
                     fixed += 1
-                    log(f"    推迟燃油trip到{new_start:.2f}h(16:00后), 惩罚+{pen2-t['penalty']:.2f}")
+                    log(f"    拆趟修复: 非绿段保留({_fh(B_data['ng']['start'])}), "
+                        f"绿段推迟({_fh(B_data['g']['start'])}), "
+                        f"较整体推迟节省{cost_inc_A - cost_inc_B:.2f}元")
+                elif ok_A:
+                    new_trips[ti] = {'route': t['route'], 'vt': veh['vt'],
+                                     'start': new_start_A, 'end': et_A,
+                                     'cost': c_A, 'travel': tr_A,
+                                     'penalty': pen_A, 'carbon': co2_A}
+                    fixed += 1
+                    log(f"    推迟燃油trip到{new_start_A:.2f}h(16:00后), 惩罚+{pen_A-orig_pen:.2f}")
+            veh['trips'] = new_trips
         vi += 1
 
     sched = [s for s in sched if s['trips']]
