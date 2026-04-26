@@ -109,7 +109,7 @@ if __name__ == '__main__':
     # 先导入（其内部会重设 sys.stdout）
     from solve_p1 import solve, print_report
 
-    out_txt = open(f'{_HERE}/p1_run.txt', 'w', encoding='utf-8')
+    out_txt = open(f'{_HERE}/p1/p1_run.txt', 'w', encoding='utf-8')
     orig_stdout = sys.stdout
     sys.stdout = _Tee(orig_stdout, out_txt)
     try:
@@ -118,10 +118,10 @@ if __name__ == '__main__':
 
         cust2orders = _load_orders()
         rows = _build_detail_rows(best_flex, dm, dw, dv, tw_s, tw_e, n2o, cust2orders)
-        pd.DataFrame(rows).to_csv(f'{_HERE}/p1_detail.csv',
+        pd.DataFrame(rows).to_csv(f'{_HERE}/p1/p1_detail.csv',
                                   index=False, encoding='utf-8-sig')
-        print(f"\n[导出] 详细停靠表: p1_detail.csv ({len(rows)}行)")
-        print(f"[导出] 执行报告: p1_run.txt")
+        print(f"\n[导出] 详细停靠表: p1/p1_detail.csv ({len(rows)}行)")
+        print(f"[导出] 执行报告: p1/p1_run.txt")
     finally:
         sys.stdout = orig_stdout
         out_txt.close()

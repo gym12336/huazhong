@@ -11,7 +11,7 @@ ev_forced_orig={c for c in green_orig if tw_s.get(c,0)<16 and tw_e.get(c,24)>8}
 print(f'强制EV客户: {sorted(ev_forced_orig)}')
 
 # 读取 p2_detail.csv（新格式：逐站清单 + 限行违规列）
-detail = pd.read_csv('p2_detail.csv', encoding='utf-8-sig')
+detail = pd.read_csv('p2/p2_detail.csv', encoding='utf-8-sig')
 
 # 出发行（停靠序号==0）记录了每趟的车型/出发时间/限行违规
 trips = detail[detail['停靠序号'] == 0].copy()

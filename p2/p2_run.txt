@@ -128,7 +128,7 @@
   2opt*: +0.00
   seed=99: 70514.14 (100条)
 
-*** 子路线成本 69768.11, 99条, 耗时 55.5s ***
+*** 子路线成本 69768.11, 99条, 耗时 68.5s ***
 
 [4] Shift Multi-Trip 择优
   delay=0.5F: 47辆 48959.66 (行驶29549.55 惩罚610.11)
@@ -258,32 +258,20 @@
   merge(thr=1500): -0辆
   swap: +109.25
   seg_rel(2): +0.00
-  2opt*: +603.96
+  2opt*: +538.53
   merge(thr=1500): -1辆
-  swap: +80.49
-  seg_rel(2): +0.23
-  2opt*: +610.20
+  swap: +74.09
+  seg_rel(2): +0.00
+  2opt*: +601.19
   merge(thr=1000): -0辆
-  swap: +28.36
+  swap: +94.97
   seg_rel(2): +0.00
-  2opt*: +581.04
+  2opt*: +500.97
   merge(thr=1000): -0辆
-  swap: +21.55
+  swap: +97.76
   seg_rel(2): +0.00
-  2opt*: +658.90
-  merge(thr=600): -0辆
-  swap: +0.00
-  seg_rel(2): +0.00
-  2opt*: +658.28
-  merge(thr=600): -0辆
-  swap: +0.00
-  seg_rel(2): +0.00
-  2opt*: +658.28
-  merge(thr=600): -0辆
-  swap: +0.00
-  seg_rel(2): +0.00
-  2opt*: +658.28
-  seed=123: 69434.78 (99条)
+  2opt*: +491.06
+  seed=123: 69629.91 (99条)
   merge(thr=1500): -0辆
   swap: +133.33
   seg_rel(2): +0.00
@@ -293,41 +281,61 @@
   seg_rel(2): +0.00
   2opt*: +128.46
   merge(thr=1000): -0辆
-  swap: +119.36
-  seg_rel(2): +0.00
-  2opt*: +307.35
+  swap: +160.93
+  seg_rel(2): +15.40
+  2opt*: +244.91
   merge(thr=1000): -0辆
-  swap: +59.56
-  seg_rel(2): +0.00
-  2opt*: +158.28
+  swap: +24.67
+  seg_rel(2): +102.36
+  2opt*: +71.88
   merge(thr=600): -0辆
-  swap: +173.67
-  seg_rel(2): +5.33
-  2opt*: +249.73
-  seed=2024: 69672.97 (100条)
+  swap: +41.08
+  seg_rel(2): +0.00
+  2opt*: +77.00
+  merge(thr=600): -1辆
+  swap: +94.19
+  seg_rel(2): +0.00
+  2opt*: +421.30
+  merge(thr=600): -0辆
+  swap: +5.07
+  seg_rel(2): +0.00
+  2opt*: +443.30
+  merge(thr=400): -0辆
+  swap: +0.00
+  seg_rel(2): +0.00
+  2opt*: +523.16
+  merge(thr=400): -0辆
+  swap: +0.10
+  seg_rel(2): +0.00
+  2opt*: +485.60
+  seed=2024: 69212.94 (99条)
   merge(thr=1500): -0辆
-  swap: +141.87
-  seg_rel(2): +6.90
-  2opt*: +339.17
+  swap: +166.62
+  seg_rel(2): +7.08
+  2opt*: +337.63
   merge(thr=1500): -1辆
-  swap: +326.30
-  seg_rel(2): +0.00
-  2opt*: +671.13
+  swap: +47.92
+  seg_rel(2): +33.95
+  2opt*: +412.73
   merge(thr=1000): -0辆
-  swap: +109.59
+  swap: +82.22
   seg_rel(2): +0.00
-  2opt*: +596.59
+  2opt*: +262.10
   merge(thr=1000): -0辆
-  swap: +88.41
+  swap: +0.00
   seg_rel(2): +0.00
-  2opt*: +540.91
+  2opt*: +338.80
   merge(thr=600): -0辆
-  swap: +102.95
+  swap: +0.00
   seg_rel(2): +0.00
-  2opt*: +596.59
-  seed=99: 69413.36 (99条)
+  2opt*: +338.80
+  merge(thr=600): -0辆
+  swap: +0.00
+  seg_rel(2): +0.00
+  2opt*: +338.80
+  seed=99: 69592.18 (99条)
 
-*** 子路线 69042.07, 98条, 耗时 76.3s ***
+*** 子路线 69042.07, 98条, 耗时 237.3s ***
 
 [4] Shift Multi-Trip + 违规检查
   d=0.5F: 47辆 48641.49 违规:2
@@ -399,10 +407,10 @@
 最终: 33辆 43296.81 (启动13200 行驶23421.51 惩罚6675.30 CO2=6371.21)
 绿色区违规: 0 ✅
 
-p2_schedule.csv: 33辆 趟/均:3.00 总计:43296.81 CO2:6371.21
+p2/p2_schedule.csv: 33辆 趟/均:3.00 总计:43296.81 CO2:6371.21
   新能源3000:10辆
   燃油3000:23辆
-已保存: p2_schedule.csv
+已保存: p2/p2_schedule.csv
 
 ============================================================
           问题1 vs 问题2 对比分析
@@ -416,11 +424,11 @@ p2_schedule.csv: 33辆 趟/均:3.00 总计:43296.81 CO2:6371.21
 政策影响:
   总成本增加: 3012.91元 (+7.5%)
   碳排放减少: 485.93kg (-7.1%)
-路线图: p2_routes.png
-费用分析图: C:\Users\LENOVO\Desktop\华中杯1.1\huazhong/p2_cost_analysis.png
+路线图: p2/p2_routes.png
+费用分析图: C:\Users\LENOVO\Desktop\华中杯1.1\huazhong/p2/p2_cost_analysis.png
 
-[导出] 详细停靠表: p2_detail.csv (346行)
-[导出] 执行报告: p2_run.txt
-[导出] 路线图:   p2_routes.png
-[导出] 成本图:   p2_cost_analysis.png
-[导出] 调度表:   p2_schedule.csv
+[导出] 详细停靠表: p2/p2_detail.csv (346行)
+[导出] 执行报告: p2/p2_run.txt
+[导出] 路线图:   p2/p2_routes.png
+[导出] 成本图:   p2/p2_cost_analysis.png
+[导出] 调度表:   p2/p2_schedule.csv

@@ -733,8 +733,8 @@ def print_report(rvt,dm,dw,dv,tw_s,tw_e,n2o,best_flex):
                          '客户序列(原始ID)':str(orig),'载重(kg)':round(w,2),
                          '体积(m3)':round(v,3),'行驶能耗(元)':round(t['travel'],2),
                          '时间窗惩罚(元)':round(t['penalty'],2),'CO2(kg)':round(t['carbon'],2)})
-    pd.DataFrame(rows).to_csv(f'{BASE}/p1_schedule.csv',index=False,encoding='utf-8-sig')
-    log("调度表已保存: p1_schedule.csv")
+    pd.DataFrame(rows).to_csv(f'{BASE}/p1/p1_schedule.csv',index=False,encoding='utf-8-sig')
+    log("调度表已保存: p1/p1_schedule.csv")
 
     # 子路线明细
     det=[]
@@ -745,7 +745,7 @@ def print_report(rvt,dm,dw,dv,tw_s,tw_e,n2o,best_flex):
                     '载重(kg)':round(sum(dw.get(x,0) for x in c),2),
                     '体积(m3)':round(sum(dv.get(x,0) for x in c),3),
                     '成本(元)':round(c2,2),'CO2(kg)':round(co2,2)})
-    pd.DataFrame(det).to_csv(f'{BASE}/p1_result.csv',index=False,encoding='utf-8-sig')
+    pd.DataFrame(det).to_csv(f'{BASE}/p1/p1_result.csv',index=False,encoding='utf-8-sig')
 
 def visualize(rvt,coords,green,n2o,save_path):
     fig,ax=plt.subplots(figsize=(13,11))
@@ -773,7 +773,7 @@ if __name__=='__main__':
     log(f"Python {sys.version.split()[0]}")
     rvt,coords,dm,dw,dv,tw_s,tw_e,green,n2o,schedule,best_flex=solve()
     print_report(rvt,dm,dw,dv,tw_s,tw_e,n2o,best_flex)
-    visualize(rvt,coords,green,n2o,f'{BASE}/p1_routes.png')
+    visualize(rvt,coords,green,n2o,f'{BASE}/p1/p1_routes.png')
     bt,_,btr,bpen,bco2=sched_cost(best_flex)
     fig,ax=plt.subplots(figsize=(6,5))
     bv=len(best_flex); st=bv*STARTUP
@@ -781,5 +781,5 @@ if __name__=='__main__':
            colors=['#FF6B6B','#4ECDC4','#45B7D1'],autopct='%1.1f%%',
            startangle=120,explode=(.04,.04,.04))
     ax.set_title(f'成本构成(总{bt:.0f}元)')
-    plt.savefig(f'{BASE}/p1_cost_pie.png',dpi=140,bbox_inches='tight'); plt.close()
+    plt.savefig(f'{BASE}/p1/p1_cost_pie.png',dpi=140,bbox_inches='tight'); plt.close()
     log("===== 问题1 完成 =====")

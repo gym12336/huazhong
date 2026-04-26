@@ -536,7 +536,7 @@ def visualize_costs(sched1, sched2, bt1, bv1, bco2_1, bt2, bv2, bco2_2):
     ax.set_title('⑥ 政策影响汇总', fontsize=10, pad=15)
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
-    save_path = f'{BASE}/p2_cost_analysis.png'
+    save_path = f'{BASE}/p2/p2_cost_analysis.png'
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
     log(f"费用分析图: {save_path}")
@@ -568,8 +568,8 @@ if __name__ == '__main__':
     rvt2, coords, dm, dw, dv, tw_s, tw_e, green_orig, n2o, sched2 = solve_p2()
     bt2, bv2, _, _, bco2_2 = sched_cost(sched2)
 
-    save_schedule(sched2, dm, dw, dv, tw_s, tw_e, n2o, green_orig, 'p2_schedule.csv')
+    save_schedule(sched2, dm, dw, dv, tw_s, tw_e, n2o, green_orig, 'p2/p2_schedule.csv')
     compare_report(bt1, bco2_1, bv1, sched1, bt2, bco2_2, bv2, sched2)
-    visualize_p2(rvt2, coords, green_orig, n2o, 'p2_routes.png')
+    visualize_p2(rvt2, coords, green_orig, n2o, 'p2/p2_routes.png')
     visualize_costs(sched1, sched2, bt1, bv1, bco2_1, bt2, bv2, bco2_2)
     log("\n===== 问题2 完成 =====")

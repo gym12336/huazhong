@@ -1043,7 +1043,7 @@ if __name__ == '__main__':
     ds_snapshot = copy.deepcopy(ds)  # 保存初始状态用于对比可视化
 
     # ── 从配置文件读取异常事件并按序触发 ─────────
-    cfg_path = os.environ.get('P3_EVENTS', f'{BASE}/p3_events.json')
+    cfg_path = os.environ.get('P3_EVENTS', f'{BASE}/p3/p3_events.json')
     if not os.path.exists(cfg_path):
         log(f"\n⚠ 未找到事件配置 {cfg_path}，使用空事件列表")
         events_cfg = []
@@ -1138,12 +1138,12 @@ if __name__ == '__main__':
                          '出发': _fmt_h(st), '返回': _fmt_h(t['end']),
                          '客户(原始ID)': str(orig), '载重kg': round(w, 2),
                          '行驶元': round(t['travel'], 2), '惩罚元': round(t['penalty'], 2)})
-    pd.DataFrame(rows).to_csv(f'{BASE}/p3_schedule.csv', index=False, encoding='utf-8-sig')
-    log("\n调度表: p3_schedule.csv")
+    pd.DataFrame(rows).to_csv(f'{BASE}/p3/p3_schedule.csv', index=False, encoding='utf-8-sig')
+    log("\n调度表: p3/p3_schedule.csv")
 
     # 4. 可视化
     visualize_dynamic(ds_snapshot, ds, coords, green_orig, n2o,
-                      ds.event_log, f'{BASE}/p3_routes.png')
-    visualize_event_impact(ds.event_log, f'{BASE}/p3_event_impact.png')
+                      ds.event_log, f'{BASE}/p3/p3_routes.png')
+    visualize_event_impact(ds.event_log, f'{BASE}/p3/p3_event_impact.png')
 
     log("\n===== 问题3 完成 =====")
