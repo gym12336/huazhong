@@ -158,6 +158,28 @@ def fix_violations(sched, dm, dw, dv, tw_s, tw_e, green_orig, n2o):
             veh['trips'] = new_trips
         vi += 1
 
+    # 串行铺开：违规修复仅独立把 trip clamp 到 16:06，可能导致同车多条 trip
+    # 起点重叠。这里按 start 排序后，强制 trip[i].start >= trip[i-1].end + buf
+    BUF = 0.05
+    n_unfold = 0
+    for veh in sched:
+        veh['trips'].sort(key=lambda t: t['start'])
+        prev_end = 0.0
+        for ti, t in enumerate(veh['trips']):
+            if prev_end > 0 and t['start'] < prev_end + BUF - 1e-6:
+                new_st = prev_end + BUF
+                c2, tr2, pen2, co2, ok, et2 = eval_r(
+                    t['route'], dm, dw, dv, tw_s, tw_e, veh['vt'], new_st)
+                if ok:
+                    veh['trips'][ti] = {'route': t['route'], 'vt': veh['vt'],
+                                        'start': new_st, 'end': et2,
+                                        'cost': c2, 'travel': tr2,
+                                        'penalty': pen2, 'carbon': co2}
+                    n_unfold += 1
+            prev_end = veh['trips'][ti]['end']
+    if n_unfold:
+        log(f"    串行铺开 {n_unfold} 条重叠trip")
+
     sched = [s for s in sched if s['trips']]
     viol_remain = count_violations(sched, green_orig, n2o)
     log(f"  fix_violations: 修复{fixed}次 剩余违规:{viol_remain} EV3000:{ev3000_used}/10 EV1250:{ev1250_used}/15")
@@ -290,6 +312,21 @@ def solve_p2():
     # 最终兜底修复：确保所有违规都被消除
     log("  最终违规修复...")
     best_sched = fix_violations(best_sched, dm, dw, dv, tw_s, tw_e, green_orig, n2o)
+
+    # 串行铺开后再次压缩车辆 & 互换trip，回收推迟造成的浪费
+    log("\n[8] 修复后再优化")
+    bt0, bv0, *_ = sched_cost(best_sched)
+    for _ in range(4):
+        before = len(best_sched)
+        best_sched = try_eliminate_vehicle(best_sched, dm, dw, dv, tw_s, tw_e,
+                                           max_delay=3.0, tlim=30)
+        if len(best_sched) == before: break
+    best_sched = sched_trip_swap(best_sched, dm, dw, dv, tw_s, tw_e, tlim=15)
+    best_sched = upgrade_ev(best_sched, dm, dw, dv, tw_s, tw_e)
+    # 再保险一次违规修复（前面互换/消除可能引入新违规）
+    best_sched = fix_violations(best_sched, dm, dw, dv, tw_s, tw_e, green_orig, n2o)
+    bt1, bv1, *_ = sched_cost(best_sched)
+    log(f"  再优化: {bv0}辆 {bt0:.2f} -> {bv1}辆 {bt1:.2f} (省{bt0-bt1:.2f}元)")
 
     # 对被推迟到16:00后的trip做路线内二次优化（减少晚到惩罚）
     log("  优化推迟trip的路线顺序...")
