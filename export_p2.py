@@ -84,12 +84,29 @@ def _build_detail_rows_p2(best_sched, dm, dw, dv, tw_s, tw_e,
     return rows
 
 if __name__ == '__main__':
-    from solve_p2 import solve_p2
+    from solve_p2 import (solve_p2, save_schedule, visualize_p2,
+                          visualize_costs, compare_report, sched_cost)
+    from solve_p1 import solve as solve_p1
     out_txt = open(f'{_HERE}/p2_run.txt', 'w', encoding='utf-8')
     orig_stdout = sys.stdout
     sys.stdout = _Tee(orig_stdout, out_txt)
     try:
+        # 先跑 P1 基准（compare_report 用）
+        print("\n>>> 问题1基准 <<<")
+        rvt1, _, dm1, dw1, dv1, tw_s1, tw_e1, green1, n2o1, _, sched1 = solve_p1()
+        bt1, bv1, _, _, bco2_1 = sched_cost(sched1)
+        print(f"问题1: {bv1}辆 {bt1:.2f}元 CO2={bco2_1:.2f}kg")
+
+        # 跑 P2
+        print("\n>>> 问题2 <<<")
         rvt, coords, dm, dw, dv, tw_s, tw_e, green_orig, n2o, best_sched = solve_p2()
+        bt2, bv2, _, _, bco2_2 = sched_cost(best_sched)
+
+        # 用同一个 best_sched 一次性写齐所有产物
+        save_schedule(best_sched, dm, dw, dv, tw_s, tw_e, n2o, green_orig, 'p2_schedule.csv')
+        compare_report(bt1, bco2_1, bv1, sched1, bt2, bco2_2, bv2, best_sched)
+        visualize_p2(rvt, coords, green_orig, n2o, 'p2_routes.png')
+        visualize_costs(sched1, best_sched, bt1, bv1, bco2_1, bt2, bv2, bco2_2)
 
         cust2orders = _load_orders()
         rows = _build_detail_rows_p2(best_sched, dm, dw, dv, tw_s, tw_e,
@@ -98,6 +115,9 @@ if __name__ == '__main__':
                                   index=False, encoding='utf-8-sig')
         print(f"\n[导出] 详细停靠表: p2_detail.csv ({len(rows)}行)")
         print(f"[导出] 执行报告: p2_run.txt")
+        print(f"[导出] 路线图:   p2_routes.png")
+        print(f"[导出] 成本图:   p2_cost_analysis.png")
+        print(f"[导出] 调度表:   p2_schedule.csv")
     finally:
         sys.stdout = orig_stdout
         out_txt.close()
